@@ -1,3 +1,5 @@
+import sys
+
 import numpy as np
 import math
 import gym
@@ -7,17 +9,25 @@ from gym_rubik_n_cubes.envs import helpers
 
 
 class RubiksCubeEnv(gym.Env):
-    def __init__(self, n, n_shuffles):
+    def __init__(self, n=3, n_shuffles=100, step_limit=100, reward_type='penalize_step', colour_pattern=None,
+                 smart_shuffles=True):
         self.n = n
+
+        self.n_shuffles = n_shuffles
+        self.step_limit = step_limit
+        self.reward_type = reward_type
+        self.smart_shuffles = smart_shuffles
+
+        self.colour_pattern = np.arange(6) if colour_pattern is None else np.array(colour_pattern)
+
         self.state = None
         self.moves = []
-        self.shape = (6, n, n, 6)
-        self.n_shuffles = n_shuffles
-        self.smart_shuffles = False
+        self.observation_shape = (6, n, n, 6)
         self.compute_reward = None
+        self.steps = 0
 
-        self.action_space = spaces.Discrete(6 * (n // 2))
-        self.observation_space = spaces.Box(low=0, high=1, shape=self.shape, dtype=np.float32)
+        self.action_space = spaces.Discrete(6 * (n // 2) * 2)
+        self.observation_space = spaces.Box(low=0, high=1, shape=self.observation_shape, dtype=np.float32)
 
         self._setup_state()
         self._setup_moves()
@@ -26,8 +36,8 @@ class RubiksCubeEnv(gym.Env):
         self.goal_state = self.state
 
     def _setup_state(self):
-        # TODO implement custom patterns
-        self.state = np.arange(6 * self.n * self.n) // (self.n * self.n)
+        state = np.arange(6 * self.n * self.n) // (self.n * self.n)
+        self.state = self.colour_pattern[state]
 
     def _setup_moves(self):
         faces = [0, 1, 2, 3, 4, 5]
@@ -74,34 +84,51 @@ class RubiksCubeEnv(gym.Env):
                     self.moves.append(np.array(move_permutation))
 
     def _setup_rewards(self):
-        def sparse_penalize_step(state, goal):
+        def penalize_step(state, goal):
             return 0 if np.array_equal(state, goal) else -1
 
-        def sparse_reached(state, goal):
+        def on_reached(state, goal):
             return 1 if np.array_equal(state, goal) else 0
 
-        def shaped_matching_stickers(state, goal):
+        def matching_stickers(state, goal):
             return np.average(state == goal)
 
-        # TODO implement reward choice
-        self.compute_reward = sparse_penalize_step
+        if self.reward_type == 'penalize_step':
+            self.compute_reward = penalize_step
+        elif self.reward_type == 'on_reached':
+            self.compute_reward = on_reached
+        elif self.reward_type == 'matching_stickers':
+            self.compute_reward = matching_stickers
+        else:
+            # No matching reward scheme found.
+            if isinstance(self.reward_type, str):
+                raise NameError('Incorrect reward type: "{0}"'.format(self.reward_type))
+            else:
+                print(
+                    'Reward type "{0}" not on the list. It will be assumed to be a function.'.format(self.reward_type),
+                    file=sys.stderr)
+                self.compute_reward = self.reward_type
 
     def reset(self):
         self._setup_state()
         self._shuffle()
+
+        self.steps = 0
 
         return self._get_state()
 
     def step(self, action):
         self._move_by_action(action)
         reward = self.compute_reward(self.state, self.goal_state)
-        done = np.array_equal(self.state, self.goal_state)
+
+        self.steps += 1
+        done = np.array_equal(self.state, self.goal_state) or self.steps >= self.step_limit
 
         return self._get_state(), reward, done, dict()
 
     def render(self, mode='human'):
         figure = np.full((3 * self.n, 4 * self.n), -1)
-        state = np.reshape(self.state, self.shape[:-1])
+        state = np.reshape(self.state, self.observation_shape[:-1])
         order = [0, 5, 2, 4, 3, 1]
 
         figure[0:self.n, self.n:2 * self.n] = np.rot90(state[order[0]])
@@ -121,14 +148,35 @@ class RubiksCubeEnv(gym.Env):
     def _move_by_action(self, action):
         self.state = self.state[self.moves[action]]
 
+    def _is_reversed(self, action1, action2):
+        if action1 is None or action2 is None:
+            return False
+        return action1 // 2 == action2 // 2
+
     def _shuffle(self):
+        last_action = None
+        last_action_counter = 0
+
         for _ in range(self.n_shuffles):
-            # TODO implement smart shuffles
-            action = self.action_space.sample()
+            while True:
+                action = self.action_space.sample()
+                if not self.smart_shuffles:
+                    break
+                if self._is_reversed(action, last_action):
+                    continue
+                if action == last_action and last_action_counter >= 3:
+                    continue
+                break
+
+            if last_action == action:
+                last_action_counter += 1
+            else:
+                last_action = action
+                last_action_counter = 1
             self._move_by_action(action)
 
     def _get_state(self):
-        return np.reshape(np.eye(6)[self.state], self.shape)
+        return np.reshape(np.eye(6)[self.state], self.observation_shape)
 
 
 class GoalRubiksCubeEnv(RubiksCubeEnv):
